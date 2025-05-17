@@ -2,6 +2,8 @@
 #include <string>
 #include <fstream>
 #include <limits>
+#define NOMINMAX
+#include <Windows.h>
 #include <sql.h>
 #include <sqlext.h>
 #include <vector>
@@ -12,12 +14,27 @@
 #endif
 
 void showError(SQLSMALLINT handleType, SQLHANDLE handle) {
-    SQLTCHAR sqlState[6] = { 0 };
-    SQLTCHAR message[1024] = { 0 };
+#ifdef UNICODE
+    SQLWCHAR sqlState[6], message[1024];
+#else
+    SQLCHAR sqlState[6], message[1024];
+#endif
+    SQLINTEGER nativeError;
+    SQLSMALLINT textLength;
+    SQLRETURN ret;
+    int i = 1;
+    while ((ret = SQLGetDiagRec(handleType, handle, i,
+        sqlState, &nativeError, message, sizeof(message) / sizeof(message[0]), &textLength)) == SQL_SUCCESS) {
+#ifdef UNICODE
+        std::wcout << L"State: " << sqlState << L", Message: " << message << L" (Native: " << nativeError << L")" << std::endl;
+#else
+        std::cout << "State: " << sqlState << ", Message: " << message << " (Native: " << nativeError << ")" << std::endl;
+#endif
+        i++;
+    }
 }
-
 using namespace std;
-
+//----------------------------------------------------
 struct partNode {
     int part_id;
     string part_name;
@@ -28,6 +45,7 @@ struct partNode {
     string chassis_number;
     partNode* next;
 };
+//-----------------------------------------------
 class DatabaseManager {
 private:
     SQLHENV env;
@@ -42,45 +60,41 @@ public:
         disconnect();
     }
 
-    bool connect(const string& server, const string& database, const string& username, const string& password) {
-        // Allocate environment handle
+    bool connect(const string&, const string&, const string&, const string&) {
         if (SQLAllocHandle(SQL_HANDLE_ENV, SQL_NULL_HANDLE, &env) != SQL_SUCCESS) {
             return false;
+            
         }
-
-        // Set ODBC version
-        if (SQLSetEnvAttr(env, SQL_ATTR_ODBC_VERSION, (void*)SQL_OV_ODBC3, 0) != SQL_SUCCESS) {
+         if (SQLSetEnvAttr(env, SQL_ATTR_ODBC_VERSION, (void*)SQL_OV_ODBC3, 0) != SQL_SUCCESS) {
             SQLFreeHandle(SQL_HANDLE_ENV, env);
             return false;
+            
         }
-
-        // Allocate connection handle
-        if (SQLAllocHandle(SQL_HANDLE_DBC, env, &dbc) != SQL_SUCCESS) {
+         if (SQLAllocHandle(SQL_HANDLE_DBC, env, &dbc) != SQL_SUCCESS) {
             SQLFreeHandle(SQL_HANDLE_ENV, env);
             return false;
+            
         }
-
-        // Build connection string
-        string connStr = "DRIVER={ODBC Driver 11 for SQL Server};SERVER=" + server +
-            ";DATABASE=" + database + ";UID=" + username +
-            ";PWD=" + password + ";";
-
-        // Connect to database
+         string connStr = "DSN=dd;UID=ADEL;PWD=121212;";
         SQLTCHAR retConnStr[1024];
         SQLSMALLINT retConnStrLen;
-        SQLRETURN ret = SQLDriverConnect(dbc, NULL, (SQLTCHAR*)connStr.c_str(), SQL_NTS,
-            retConnStr, sizeof(retConnStr), &retConnStrLen,
-            SQL_DRIVER_NOPROMPT);
-
-        if (ret != SQL_SUCCESS && ret != SQL_SUCCESS_WITH_INFO) {
+        #ifdef UNICODE
+             std::wstring wconnStr(connStr.begin(), connStr.end());
+        SQLRETURN ret = SQLDriverConnect(dbc, NULL, (SQLWCHAR*)wconnStr.c_str(), SQL_NTS,
+            retConnStr, sizeof(retConnStr) / sizeof(SQLWCHAR), &retConnStrLen, SQL_DRIVER_NOPROMPT);
+        #else
+             SQLRETURN ret = SQLDriverConnect(dbc, NULL, (SQLCHAR*)connStr.c_str(), SQL_NTS,
+                retConnStr, sizeof(retConnStr), &retConnStrLen, SQL_DRIVER_NOPROMPT);
+        #endif
+             if (ret != SQL_SUCCESS && ret != SQL_SUCCESS_WITH_INFO) {
             showError(SQL_HANDLE_DBC, dbc);
             disconnect();
             return false;
+            
         }
-
-        connected = true;
+         connected = true;
         return true;
-    }
+        }
 
     void disconnect() {
         if (stmt) {
@@ -122,21 +136,27 @@ public:
 
     bool executeQuery(const string& query) {
         if (!connected) return false;
-
         if (SQLAllocHandle(SQL_HANDLE_STMT, dbc, &stmt) != SQL_SUCCESS) {
             showError(SQL_HANDLE_DBC, dbc);
             return false;
+            
+        }
+         #ifdef UNICODE
+             std::wstring wquery(query.begin(), query.end());
+        if (SQLExecDirect(stmt, (SQLWCHAR*)wquery.c_str(), SQL_NTS) != SQL_SUCCESS) {
+            #else
+                 if (SQLExecDirect(stmt, (SQLCHAR*)query.c_str(), SQL_NTS) != SQL_SUCCESS) {
+                #endif
+                    showError(SQL_HANDLE_STMT, stmt);
+                SQLFreeHandle(SQL_HANDLE_STMT, stmt);
+                stmt = nullptr;
+                return false;
+                
+            }
+             return true;
+            
         }
 
-        if (SQLExecDirect(stmt, (SQLTCHAR*)query.c_str(), SQL_NTS) != SQL_SUCCESS) {
-            showError(SQL_HANDLE_STMT, stmt);
-            SQLFreeHandle(SQL_HANDLE_STMT, stmt);
-            stmt = nullptr;
-            return false;
-        }
-
-        return true;
-    }
 
     bool fetchResults(vector<vector<string>>& results) {
         if (!stmt) return false;
@@ -185,6 +205,7 @@ public:
         return executeQuery(query);
     }
 };
+//-----------------------------------------------
 class partLinkedList {
 private:
     partNode* head;
@@ -194,11 +215,14 @@ public:
     partLinkedList() : head(nullptr) {
         if (!db.connect("localhost", "parts2", "ADEL", "121212")) {
             cout << "\033[33mWarning: Could not connect to database. Using local storage only.\033[0m\n";
+            
         }
-        else {
+         else {
             db.createPartsTable();
             loadFromDatabase();
+            
         }
+        
     }
 
     ~partLinkedList() {
@@ -209,7 +233,9 @@ public:
             current = nextNode;
         }
     }
-
+    bool isDatabaseConnected() {
+        return db.isConnected();
+    }
     void loadFromDatabase() {
         if (!db.isConnected()) return;
 
@@ -495,20 +521,24 @@ public:
         in.close();
         cout << "\033[32mData loaded from file.\033[0m\n";
     }
-};
-int main() {
+    //----------------------------------------------------------------------------------------------------------------------
+}; int main() {
     partLinkedList parts;
-    parts.loadFromFile("parts_data.txt");
+
+    if (!parts.isDatabaseConnected()) {
+        cout << "\033[33mWarning: Could not connect to the database. Using local storage only.\033[0m\n";
+        
+    }
 
     int choice;
     do {
         system("cls");
         cout << "\033[31m \t\tParts sales store\033[0m";
         cout << "\n\t_____________________________________\n";
-        cout << "\n1. Add Part\n2. Delete Part\n3. Update Part\n4. Search Part\n5. Display All\n6. Save\n7. Exit\n";
+        cout << "\n1. Add Part\n2. Delete Part\n3. Update Part\n4. Search Part\n5. Display All\n6. Save\n7. Reload Database\n8. Exit\n";
         cout << "\033[94mEnter your choice: \033[0m";
-        while (!(cin >> choice) || choice < 1 || choice > 7) {
-            cout << "\033[33mInvalid input. Enter a number between 1-7.\033[0m\n";
+        while (!(cin >> choice) || choice < 1 || choice > 8) {
+            cout << "\033[33mInvalid input. Enter a number between 1-8.\033[0m\n";
             cin.clear();
             cin.ignore(numeric_limits<streamsize>::max(), '\n');
         }
@@ -540,32 +570,37 @@ int main() {
             parts.addPart(id, part_name, position, company, model, year, chassis);
             system("pause");
             break;
+
         case 2:
             system("cls");
-            cout << "\033[31m \t\t Add part information\033[0m";
+            cout << "\033[31m \t\t Delete part information\033[0m";
             cout << "\n\t_____________________________________\n";
             cout << "Enter Part ID or Name to delete: ";
             getline(cin, part_name);
             parts.deletePart(part_name);
             system("pause");
             break;
+
         case 3:
             system("cls");
-            cout << "\033[31m \t\t Add part information\033[0m";
+            cout << "\033[31m \t\t Update part information\033[0m";
             cout << "\n\t_____________________________________\n";
             cout << "Enter Part ID or Name to update: ";
             getline(cin, part_name);
             parts.updatePart(part_name);
             system("pause");
             break;
+
         case 4:
             system("cls");
-            cout << "\033[31m \t\t Add part information\033[0m";
+            cout << "\033[31m \t\t Search part information\033[0m";
             cout << "\n\t_____________________________________\n";
             cout << "Enter Part ID or Name to search: ";
             getline(cin, part_name);
             parts.searchPart(part_name);
+            system("pause");
             break;
+
         case 5:
             system("cls");
             cout << "\033[31m \t\t All parts information\033[0m";
@@ -573,15 +608,31 @@ int main() {
             parts.displayAll();
             system("pause");
             break;
+
         case 6:
             parts.saveToFile("parts_data.txt");
+            cout << "\033[32mData saved successfully.\033[0m\n";
             system("pause");
             break;
+
         case 7:
+            // Reload data from the database
+            if (parts.isDatabaseConnected()) {
+                parts.loadFromDatabase();
+                cout << "\033[32mData reloaded from the database.\033[0m\n";
+            }
+            else {
+                cout << "\033[33mDatabase connection is not available.\033[0m\n";
+            }
+            system("pause");
+            break;
+
+        case 8:
             cout << "\033[31mExiting program...\033[0m\n";
+            parts.isDatabaseConnected();  // Explicitly disconnect from the database
             break;
         }
-    } while (choice != 7);
+    } while (choice != 8);
 
     return 0;
 }
